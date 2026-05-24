@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /d/work/Mangiamo/mangiamo-app && grep -rEn \"border:|radius\\\\s*[:=]|lg:|md:\" src/theme/*.ts 2>/dev/null | grep -iE \"border|radius|lg:|md:\" | head -40)",
+      "Read(//d/d/work/Mangiamo/mangiamo-app/src/**)",
+      "Bash(node -e \"const s=require\\('./package.json'\\).scripts; console.log\\(JSON.stringify\\(s,null,1\\)\\)\")",
+      "Bash(npx tsc *)",
+      "Bash(deno test *)",
+      "Bash(deno check *)",
+      "Bash(dir \"d:\\\\work\\\\Mangiamo\\\\mangiamo-manager\\\\src\" /b)",
+      "Bash(supabase db *)",
+      "Bash(supabase functions *)"
+    ]
+  }
+}
