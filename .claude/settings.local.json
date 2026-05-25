@@ -9,7 +9,12 @@
       "Bash(deno check *)",
       "Bash(dir \"d:\\\\work\\\\Mangiamo\\\\mangiamo-manager\\\\src\" /b)",
       "Bash(supabase db *)",
-      "Bash(supabase functions *)"
+      "Bash(supabase functions *)",
+      "Bash(cd /d/work/Mangiamo/mangiamo-my && cat package.json | grep -A 20 '\"scripts\"')",
+      "Read(//d/d/work/Mangiamo/mangiamo-my/**)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
