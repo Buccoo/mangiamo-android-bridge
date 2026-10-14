@@ -97,7 +97,7 @@ object BridgeStateStore {
             supabaseUrl = BuildConfig.BRIDGE_SUPABASE_URL.trim(),
             supabaseAnonKey = BuildConfig.BRIDGE_SUPABASE_ANON_KEY.trim(),
             pollIntervalMs = prefs(context).getLong(KEY_POLL_INTERVAL_MS, BridgeConfig.POLL_INTERVAL_MS).coerceAtLeast(1500L),
-            claimLimit = prefs(context).getInt(KEY_CLAIM_LIMIT, BridgeConfig.CLAIM_LIMIT).coerceIn(1, 50),
+            claimLimit = 1,
             consumerId = consumerId,
             deviceName = prefs(context).getString(KEY_DEVICE_NAME, fallbackDeviceName).orEmpty().ifBlank { fallbackDeviceName }
         )

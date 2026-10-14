@@ -5,16 +5,16 @@ import android.util.Log
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 object BridgeLoop {
     private const val TAG = "BridgeLoop"
 
-    @Volatile
-    private var cycleLock = false
+    private val cycleLock = AtomicBoolean(false)
 
     fun runCycle(context: Context) {
-        if (cycleLock) return
-        cycleLock = true
+        if (!cycleLock.compareAndSet(false, true)) return
         try {
             val runtimeConfig = BridgeStateStore.getRuntimeConfig(context)
             var session = BridgeStateStore.getSession(context)
@@ -41,6 +41,13 @@ object BridgeLoop {
                 isActive = true
             )
 
+            val journal = FilePrintJournal(File(context.filesDir, "print-delivery-journal.properties"))
+            for (pending in journal.list().filter { it.operation.restaurantId == restaurant.id }) {
+                deliverPrintJob(journal, pending.operation, { error("Recovery must not send a ticket") }, { success, errorMessage, state ->
+                    BridgeApiClient.completePrintJob(runtimeConfig, session, pending.operation.jobId, success, errorMessage, state, pending.operation.consumerId)
+                })
+            }
+
             val jobs = BridgeApiClient.claimPrintJobs(
                 config = runtimeConfig,
                 session = session,
@@ -53,30 +60,20 @@ object BridgeLoop {
 
             for (job in jobs) {
                 try {
-                    BridgePrinter.printJob(job)
-                    BridgeApiClient.completePrintJob(
-                        config = runtimeConfig,
-                        session = session,
-                        jobId = job.id,
-                        success = true,
-                        errorMessage = null
-                    )
-                    BridgeStateStore.incrementPrinted(context, 1)
+                    val outcome = deliverPrintJob(journal, PrintOperation(job.id, restaurant.id, runtimeConfig.consumerId), {
+                        try { BridgeApiClient.renewPrintClaim(runtimeConfig, session, job.id) }
+                        catch (error: Throwable) { throw PrintNotSentException(normalizeError(error)) }
+                        BridgePrinter.printJob(job)
+                    }, { success, errorMessage, state ->
+                        BridgeApiClient.completePrintJob(runtimeConfig, session, job.id, success, errorMessage, state)
+                    })
+                    if (outcome == "sent") BridgeStateStore.incrementPrinted(context, 1)
+                    else BridgeStateStore.incrementFailed(context, 1)
                 } catch (jobError: Throwable) {
                     val message = normalizeError(jobError)
-                    try {
-                        BridgeApiClient.completePrintJob(
-                            config = runtimeConfig,
-                            session = session,
-                            jobId = job.id,
-                            success = false,
-                            errorMessage = message
-                        )
-                    } catch (ackError: Throwable) {
-                        Log.e(TAG, "Ack failed for ${job.id}: ${normalizeError(ackError)}")
-                    }
                     BridgeStateStore.incrementFailed(context, 1)
-                    Log.e(TAG, "Job failed ${job.id}: $message")
+                    Log.e(TAG, "Ack pending ${job.id}: $message; no automatic resend")
+                    throw jobError
                 }
             }
 
@@ -88,7 +85,7 @@ object BridgeLoop {
             BridgeStateStore.setLastError(context, message)
             Log.e(TAG, "Bridge cycle failed: $message", error)
         } finally {
-            cycleLock = false
+            cycleLock.set(false)
         }
     }
 

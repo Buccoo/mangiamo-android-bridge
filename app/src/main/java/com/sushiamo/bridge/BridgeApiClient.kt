@@ -132,15 +132,19 @@ object BridgeApiClient {
         session: BridgeSession,
         jobId: String,
         success: Boolean,
-        errorMessage: String?
+        errorMessage: String?,
+        deliveryState: String? = null,
+        consumerId: String = config.consumerId
     ) {
         val url = rpcUrl(config.supabaseUrl, "print_complete_job")
         val body = JSONObject()
             .put("p_job_id", jobId)
-            .put("p_consumer_id", config.consumerId)
+            .put("p_consumer_id", consumerId)
             .put("p_success", success)
             .put("p_error", if (success) JSONObject.NULL else (errorMessage ?: "PRINT_FAILED").take(500))
-            .put("p_meta", JSONObject().put("source", "android_bridge").put("device_name", config.deviceName))
+            .put("p_meta", JSONObject().put("source", "android_bridge").put("device_name", config.deviceName).apply {
+                if (deliveryState != null) put("delivery_state", deliveryState)
+            })
             .toString()
 
         executeJson(
@@ -153,6 +157,13 @@ object BridgeApiClient {
                 .build(),
             errorContext = "PRINT_COMPLETE_JOB"
         )
+    }
+
+    fun renewPrintClaim(config: BridgeRuntimeConfig, session: BridgeSession, jobId: String) {
+        executeJson(Request.Builder().url(rpcUrl(config.supabaseUrl, "print_renew_claim"))
+            .post(JSONObject().put("p_job_id", jobId).put("p_consumer_id", config.consumerId).toString().toRequestBody(jsonMediaType))
+            .header("apikey", config.supabaseAnonKey).header("authorization", "Bearer ${session.accessToken}")
+            .header("content-type", "application/json").build(), "PRINT_RENEW_CLAIM")
     }
 
     private fun buildAuthUrl(baseUrl: String, grantType: String): String {

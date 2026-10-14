@@ -16,7 +16,7 @@ object BridgePrinter {
         val host = route?.optString("host", "")?.trim().orEmpty()
         val port = route?.optInt("port", 9100) ?: 9100
         if (host.isBlank()) {
-            throw IllegalStateException("NO_PRINTER_HOST")
+            throw PrintNotSentException("NO_PRINTER_HOST")
         }
 
         val payload = parseJsonObject(job.payload)
@@ -34,17 +34,19 @@ object BridgePrinter {
                 return
             } catch (error: Throwable) {
                 lastError = error
+                if (error !is PrintNotSentException) throw error
                 if (attempt == 0) {
                     Thread.sleep(350)
                 }
             }
         }
-        throw IllegalStateException(lastError?.message ?: "PRINT_SEND_FAILED")
+        throw PrintNotSentException(lastError?.message ?: "PRINT_SEND_FAILED")
     }
 
     private fun sendRawPayload(host: String, port: Int, payload: ByteArray) {
         Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, sanitizePort(port)), 8000)
+            try { socket.connect(InetSocketAddress(host, sanitizePort(port)), 8000) }
+            catch (error: Throwable) { throw PrintNotSentException(error.message ?: "CONNECT_FAILED") }
             socket.soTimeout = 8000
             BufferedOutputStream(socket.getOutputStream()).use { out ->
                 out.write(payload)
@@ -87,6 +89,16 @@ object BridgePrinter {
                 val label = "${qty}x ${prettifyDishName(item.opt("name"))}"
                 for (chunk in wrapText(label, width)) {
                     appendLine(chunk)
+                }
+                val modifiers = item.optJSONArray("modifiers") ?: JSONArray()
+                for (modifierIndex in 0 until modifiers.length()) {
+                    val modifier = modifiers.optJSONObject(modifierIndex) ?: continue
+                    val name = modifier.optString("name", "").trim()
+                    if (name.isBlank()) continue
+                    val modifierQuantity = modifier.optInt("qty", 1).coerceAtLeast(1)
+                    val prefix = if (modifier.optString("modifier_type") == "addon") "+ " else "Variante: "
+                    val suffix = if (modifierQuantity > 1) " x$modifierQuantity" else ""
+                    wrapText("$prefix$name$suffix", width - 2).forEach { appendLine(" $it") }
                 }
                 val notes = item.optString("notes", "").trim()
                 if (notes.isNotBlank()) {
@@ -155,8 +167,12 @@ object BridgePrinter {
         val raw = value.toString().trim()
         if (raw.isBlank()) return ""
         return try {
-            val instant = java.time.Instant.parse(raw)
-            val date = Date.from(instant)
+            // java.time requires API 26; keep the declared Android 6+ support.
+            val normalized = raw.replace(Regex("Z$"), "+0000")
+                .replace(Regex("([+-]\\d{2}):(\\d{2})$"), "\$1\$2")
+                .replace(Regex("\\.(\\d+)(?=[+-]\\d{4}$)")) { "." + it.groupValues[1].take(3).padEnd(3, '0') }
+            val pattern = if (normalized.contains('.')) "yyyy-MM-dd'T'HH:mm:ss.SSSZ" else "yyyy-MM-dd'T'HH:mm:ssZ"
+            val date = SimpleDateFormat(pattern, Locale.US).apply { isLenient = false }.parse(normalized) ?: return raw
             SimpleDateFormat("yyyy/M/d HH:mm", Locale.getDefault()).format(date)
         } catch (_: Throwable) {
             raw
