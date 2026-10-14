@@ -1,5 +1,6 @@
 import org.gradle.api.GradleException
 import java.util.Properties
+import java.util.Base64
 
 plugins {
     id("com.android.application")
@@ -30,7 +31,12 @@ fun escapeBuildConfig(value: String): String =
 
 val bridgeSupabaseUrl = readBuildSecret("BRIDGE_SUPABASE_URL")
 val bridgeSupabaseAnonKey = readBuildSecret("BRIDGE_SUPABASE_ANON_KEY")
-val hasBridgeRuntimeSecrets = bridgeSupabaseUrl.isNotBlank() && bridgeSupabaseAnonKey.isNotBlank()
+fun isPublicClientKey(key: String): Boolean {
+    if (key.startsWith("sb_publishable_")) return true
+    val payload = runCatching { String(Base64.getUrlDecoder().decode(key.split('.').getOrNull(1).orEmpty())) }.getOrNull() ?: return false
+    return Regex("\"role\"\\s*:\\s*\"anon\"").containsMatchIn(payload)
+}
+val hasBridgeRuntimeSecrets = bridgeSupabaseUrl.isNotBlank() && isPublicClientKey(bridgeSupabaseAnonKey)
 
 android {
     namespace = "com.sushiamo.bridge"
@@ -40,8 +46,8 @@ android {
         applicationId = "com.sushiamo.bridge"
         minSdk = 23
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.2.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -95,7 +101,7 @@ gradle.taskGraph.whenReady {
         name.contains("Release") && (name.contains("assemble") || name.contains("bundle"))
     }
     if (releaseRequested && !hasBridgeRuntimeSecrets) {
-        throw GradleException("Missing BRIDGE_SUPABASE_URL / BRIDGE_SUPABASE_ANON_KEY for release build")
+        throw GradleException("Release builds require BRIDGE_SUPABASE_URL and a Supabase publishable or anon client key; privileged keys are forbidden")
     }
 }
 
