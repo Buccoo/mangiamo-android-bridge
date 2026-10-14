@@ -96,7 +96,11 @@ object BridgePrinter {
                     val name = modifier.optString("name", "").trim()
                     if (name.isBlank()) continue
                     val modifierQuantity = modifier.optInt("qty", 1).coerceAtLeast(1)
-                    val prefix = if (modifier.optString("modifier_type") == "addon") "+ " else "Variante: "
+                    val prefix = when (modifier.optString("modifier_type", "variant").trim().lowercase(Locale.ROOT)) {
+                        "remove", "removal" -> "SENZA "
+                        "extra", "addon" -> "+ "
+                        else -> "Variante: "
+                    }
                     val suffix = if (modifierQuantity > 1) " x$modifierQuantity" else ""
                     wrapText("$prefix$name$suffix", width - 2).forEach { appendLine(" $it") }
                 }

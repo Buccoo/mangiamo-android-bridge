@@ -66,12 +66,15 @@ class PrintDeliveryTest {
         assertEquals(0, sends)
     }
     @Test fun actualTicketContainsModifiersAndTheirQuantities() {
-        val payload = JSONObject("""{"restaurant_name":"Fixture","items":[{"name":"Nigiri","quantity":1,"modifiers":[{"name":"Salmone","qty":2,"modifier_type":"variant"},{"name":"Avocado","qty":1,"modifier_type":"addon"}]}]}""")
+        val payload = JSONObject("""{"restaurant_name":"Fixture","items":[{"name":"Nigiri","quantity":1,"modifiers":[{"name":"Salmone","qty":2,"modifier_type":"variant"},{"name":"Avocado","qty":1,"modifier_type":"extra"},{"name":"Wasabi","qty":1,"modifier_type":"remove"},{"name":"Cipolla","qty":2,"modifier_type":"removal"},{"name":"Maionese","qty":1,"modifier_type":"addon"}]}]}""")
         val job = ClaimedPrintJob("fixture-job", "sushi", null, payload.toString(), null)
         val method = BridgePrinter.javaClass.getDeclaredMethod("renderTicket", ClaimedPrintJob::class.java, JSONObject::class.java)
         method.isAccessible = true
         val rendered = method.invoke(BridgePrinter, job, payload) as String
         assertTrue(rendered.contains("Salmone x2"))
-        assertTrue(rendered.contains("Avocado"))
+        assertTrue(rendered.contains("+ Avocado"))
+        assertTrue(rendered.contains("SENZA Wasabi"))
+        assertTrue(rendered.contains("SENZA Cipolla x2"))
+        assertTrue(rendered.contains("+ Maionese"))
     }
 }
