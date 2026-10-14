@@ -64,7 +64,7 @@ jobs:
         run: |
           set -euo pipefail
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)
-          CERT_SHA256=$("$APKSIGNER" verify --print-certs app/build/outputs/apk/release/mangiamo-android-bridge.apk | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d '[:space:]' | tr 'A-F' 'a-f')
+          CERT_SHA256=$("$APKSIGNER" verify --print-certs app/build/outputs/apk/release/mangiamo-android-bridge.apk | sed -nE 's/^.*certificate SHA-256 digest:[[:space:]]*([[:xdigit:]:[:space:]]+)$/\1/ip' | tr -d '[:space:]:' | tr 'A-F' 'a-f')
           printf 'APK signer SHA256: %s\nExpected SHA256: %s\n' "$CERT_SHA256" "8cf9c92ef64895c4be657123c4be6d40b88ae9359e38c2e351fbb04e713be1b6"
           test "$CERT_SHA256" = "8cf9c92ef64895c4be657123c4be6d40b88ae9359e38c2e351fbb04e713be1b6"
 
