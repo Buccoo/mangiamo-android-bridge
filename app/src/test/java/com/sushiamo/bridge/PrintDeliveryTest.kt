@@ -27,15 +27,15 @@ class PrintDeliveryTest {
         return (if (method.parameterCount == 2) method.invoke(BridgePrinter, text, compact) else method.invoke(BridgePrinter, text)) as ByteArray
     }
 
-    @Test fun pinSlipHasOnlyOneTableAndPinLinePreservingLeadingZeros() {
-        assertEquals("TAV. 12  PIN: 0123", renderPin(pinPayload()))
+    @Test fun pinSlipSeparatesTableFromReadablePinPreservingLeadingZeros() {
+        assertEquals("TAV. 12\nPIN: 0123", renderPin(pinPayload()))
     }
 
     @Test fun pinSlipBoundsWideTableLabelsAndRemovesControlCharacters() {
-        assertEquals("TAV. 12  PIN: 0123", renderPin(pinPayload("\u001b\n12\r\t\u001d")))
-        assertEquals("TAV. ABCDEFGHIJKL  PIN: 001234", renderPin(pinPayload("ABCDEFGHIJKLMNOPQRST", "001234")))
-        assertEquals("TAV. 一二三四五六  PIN: 001234", renderPin(pinPayload("一二三四五六七八九十", "001234")))
-        assertEquals("TAV. 12  PIN: 0123", renderPin(pinPayload("\u202e12\u200b")))
+        assertEquals("TAV. 12\nPIN: 0123", renderPin(pinPayload("\u001b\n12\r\t\u001d")))
+        assertEquals("TAV. ABCDEFGHIJKL\nPIN: 001234", renderPin(pinPayload("ABCDEFGHIJKLMNOPQRST", "001234")))
+        assertEquals("TAV. 一二三四五六\nPIN: 001234", renderPin(pinPayload("一二三四五六七八九十", "001234")))
+        assertEquals("TAV. 12\nPIN: 0123", renderPin(pinPayload("\u202e12\u200b")))
     }
 
     @Test fun malformedPinIsNotPrintedAsArbitraryText() {
@@ -50,14 +50,15 @@ class PrintDeliveryTest {
         }
     }
 
-    @Test fun pinBytesHaveOneContentLineAndOnlyOneFeedBeforeCutting() {
-        val expected = byteArrayOf(0x1b, 0x40, 0x1b, 0x4d, 1, 0x1b, 0x20, 2, 0x1b, 0x45, 1) +
-            "TAV. 12  PIN: 0123\n".toByteArray(Charsets.UTF_8) +
-            byteArrayOf(0x1b, 0x45, 0, 0x1b, 0x64, 1, 0x1d, 0x56, 0)
-        assertArrayEquals(expected, buildBytes("TAV. 12  PIN: 0123", true))
+    @Test fun pinBytesEnlargeOnlyPinAndReachWorkingKitchenCutterPosition() {
+        val expected = byteArrayOf(0x1b, 0x40, 0x1b, 0x4d, 0, 0x1b, 0x20, 2, 0x1b, 0x61, 1, 0x1b, 0x45, 1) +
+            "TAV. 12\n".toByteArray(Charsets.UTF_8) + byteArrayOf(0x1d, 0x21, 0x11) +
+            "PIN: 0123\n".toByteArray(Charsets.UTF_8) +
+            byteArrayOf(0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 5, 0x1d, 0x56, 0)
+        assertArrayEquals(expected, buildBytes("TAV. 12\nPIN: 0123", true))
     }
 
-    @Test fun actualPinJobUsesCompactBytesOnItsExplicitRoute() {
+    @Test fun actualPinJobSendsLargePinAndCutterBytesOnlyOnItsExplicitRoute() {
         java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { server ->
             server.soTimeout = 3000
             val received = java.util.concurrent.CompletableFuture<ByteArray>()
@@ -69,12 +70,24 @@ class PrintDeliveryTest {
             try {
                 val route = JSONObject().put("host", "127.0.0.1").put("port", server.localPort)
                 BridgePrinter.printJob(ClaimedPrintJob("fixture-pin", "pin", null, pinPayload().toString(), route.toString()))
-                val expected = byteArrayOf(0x1b, 0x40, 0x1b, 0x4d, 1, 0x1b, 0x20, 2, 0x1b, 0x45, 1) +
-                    "TAV. 12  PIN: 0123\n".toByteArray(Charsets.UTF_8) +
-                    byteArrayOf(0x1b, 0x45, 0, 0x1b, 0x64, 1, 0x1d, 0x56, 0)
+                val expected = byteArrayOf(0x1b, 0x40, 0x1b, 0x4d, 0, 0x1b, 0x20, 2, 0x1b, 0x61, 1, 0x1b, 0x45, 1) +
+                    "TAV. 12\n".toByteArray(Charsets.UTF_8) + byteArrayOf(0x1d, 0x21, 0x11) +
+                    "PIN: 0123\n".toByteArray(Charsets.UTF_8) +
+                    byteArrayOf(0x1b, 0x45, 0, 0x1d, 0x21, 0, 0x1b, 0x61, 0, 0x1b, 0x4d, 1, 0x1b, 0x64, 5, 0x1d, 0x56, 0)
                 assertArrayEquals(expected, received.get(5, java.util.concurrent.TimeUnit.SECONDS))
             } finally { receiver.join(3500) }
         }
+    }
+
+    @Test fun longestPinFitsBothNarrowAndWideThermalPaper() {
+        val bytes = buildBytes(renderPin(pinPayload("ABCDEFGHIJKLMNOPQRST", "001234")), true)
+        val pin = "PIN: 001234\n".toByteArray(Charsets.UTF_8)
+        val start = bytes.toList().windowed(pin.size).indexOfFirst { it == pin.toList() }
+        assertTrue(start > 0)
+        assertArrayEquals(byteArrayOf(0x1d, 0x21, 0x11), bytes.copyOfRange(start - 3, start))
+        val pinWidthDots = "PIN: 001234".length * (12 + 2) * 2
+        for (printableWidthDots in listOf(384, 576)) assertTrue(pinWidthDots <= printableWidthDots)
+        assertEquals(2, bytes.count { it == 0x0a.toByte() })
     }
 
     @Test fun kitchenBytesKeepTheirExistingFiveLineFeedAndCut() {

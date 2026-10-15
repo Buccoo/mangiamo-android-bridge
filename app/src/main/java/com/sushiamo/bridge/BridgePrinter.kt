@@ -116,7 +116,7 @@ object BridgePrinter {
     private fun isPinSlipJob(job: ClaimedPrintJob, payload: JSONObject?): Boolean =
         normalizeDepartment(job.department) == "pin" && payload?.optString("purpose", "") == "pin_slip"
 
-    /** Keep the whole PIN line within 32 columns, including common CJK table labels. */
+    /** Bound table labels on narrow receipt paper, including common CJK labels. */
     private fun compactTableLabel(value: Any?): String {
         val clean = value?.toString().orEmpty().take(160)
             .replace(Regex("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]"), " ")
@@ -147,7 +147,7 @@ object BridgePrinter {
         val pinRaw = firstItem?.optString("name", "")?.replace(Regex("^PIN:\\s*", RegexOption.IGNORE_CASE), "")?.trim().orEmpty()
 
         if (!Regex("^[0-9]{4,6}$").matches(pinRaw)) throw PrintNotSentException("INVALID_PIN_SLIP")
-        return "TAV. ${compactTableLabel(payload?.opt("table_number"))}  PIN: $pinRaw"
+        return "TAV. ${compactTableLabel(payload?.opt("table_number"))}\nPIN: $pinRaw"
     }
 
     private fun wrapText(input: String, width: Int): List<String> {
@@ -230,8 +230,9 @@ object BridgePrinter {
         val out = ByteArrayOutputStream()
 
         out.write(byteArrayOf(esc, 0x40))
-        out.write(byteArrayOf(esc, 0x4D, 0x01))
+        out.write(byteArrayOf(esc, 0x4D, if (pinSlip) 0x00 else 0x01))
         out.write(byteArrayOf(esc, 0x20, 0x02))
+        if (pinSlip) out.write(byteArrayOf(esc, 0x61, 0x01))
 
         var bold = false
         var size: Byte = 0x00
@@ -244,7 +245,7 @@ object BridgePrinter {
                 bold = shouldBold
             }
 
-            val nextSize: Byte = if (pinSlip) 0x00 else getLinePrintSize(line)
+            val nextSize: Byte = getLinePrintSize(line)
             if (nextSize != size) {
                 out.write(byteArrayOf(gs, 0x21, nextSize))
                 size = nextSize
@@ -255,8 +256,14 @@ object BridgePrinter {
 
         if (bold) out.write(byteArrayOf(esc, 0x45, 0x00))
         if (size.toInt() != 0) out.write(byteArrayOf(gs, 0x21, 0x00))
+        if (pinSlip) {
+            out.write(byteArrayOf(esc, 0x61, 0x00))
+            out.write(byteArrayOf(esc, 0x4D, 0x01))
+        }
 
-        out.write(byteArrayOf(esc, 0x64, if (pinSlip) 0x01 else 0x05))
+        // Match the working kitchen feed/cut: a one-line feed can leave the
+        // short slip behind the cutter rather than where it can be collected.
+        out.write(byteArrayOf(esc, 0x64, 0x05))
         out.write(byteArrayOf(gs, 0x56, 0x00))
         return out.toByteArray()
     }
