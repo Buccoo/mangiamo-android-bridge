@@ -3,11 +3,95 @@ package com.sushiamo.bridge
 import org.json.JSONObject
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.fail
 import org.junit.Test
 import java.nio.file.Files
 
 class PrintDeliveryTest {
+    private fun pinPayload(table: String = "12", pin: String = "0123") = JSONObject()
+        .put("purpose", "pin_slip").put("department", "pin").put("restaurant_name", "Never print this header")
+        .put("table_number", table).put("items", org.json.JSONArray().put(JSONObject().put("name", "PIN: $pin")))
+
+    private fun renderPin(payload: JSONObject): String {
+        val job = ClaimedPrintJob("fixture-pin", "pin", null, payload.toString(), null)
+        val method = BridgePrinter.javaClass.getDeclaredMethod("renderTicket", ClaimedPrintJob::class.java, JSONObject::class.java)
+        method.isAccessible = true
+        return method.invoke(BridgePrinter, job, payload) as String
+    }
+
+    private fun buildBytes(text: String, compact: Boolean): ByteArray {
+        val method = BridgePrinter.javaClass.declaredMethods.firstOrNull { it.name == "buildEscPosPayload" && it.parameterCount == 2 }
+            ?: BridgePrinter.javaClass.getDeclaredMethod("buildEscPosPayload", String::class.java)
+        method.isAccessible = true
+        return (if (method.parameterCount == 2) method.invoke(BridgePrinter, text, compact) else method.invoke(BridgePrinter, text)) as ByteArray
+    }
+
+    @Test fun pinSlipHasOnlyOneTableAndPinLinePreservingLeadingZeros() {
+        assertEquals("TAV. 12  PIN: 0123", renderPin(pinPayload()))
+    }
+
+    @Test fun pinSlipBoundsWideTableLabelsAndRemovesControlCharacters() {
+        assertEquals("TAV. 12  PIN: 0123", renderPin(pinPayload("\u001b\n12\r\t\u001d")))
+        assertEquals("TAV. ABCDEFGHIJKL  PIN: 001234", renderPin(pinPayload("ABCDEFGHIJKLMNOPQRST", "001234")))
+        assertEquals("TAV. 一二三四五六  PIN: 001234", renderPin(pinPayload("一二三四五六七八九十", "001234")))
+        assertEquals("TAV. 12  PIN: 0123", renderPin(pinPayload("\u202e12\u200b")))
+    }
+
+    @Test fun malformedPinIsNotPrintedAsArbitraryText() {
+        for (pin in listOf("", "123", "1234567", "12\n34", "0123\u001bd\u0005", "12AB")) {
+            try {
+                renderPin(pinPayload(pin = pin))
+                fail("invalid PIN must not be printed")
+            } catch (error: java.lang.reflect.InvocationTargetException) {
+                assertTrue(error.cause is PrintNotSentException)
+                assertEquals("INVALID_PIN_SLIP", error.cause?.message)
+            }
+        }
+    }
+
+    @Test fun pinBytesHaveOneContentLineAndOnlyOneFeedBeforeCutting() {
+        val expected = byteArrayOf(0x1b, 0x40, 0x1b, 0x4d, 1, 0x1b, 0x20, 2, 0x1b, 0x45, 1) +
+            "TAV. 12  PIN: 0123\n".toByteArray(Charsets.UTF_8) +
+            byteArrayOf(0x1b, 0x45, 0, 0x1b, 0x64, 1, 0x1d, 0x56, 0)
+        assertArrayEquals(expected, buildBytes("TAV. 12  PIN: 0123", true))
+    }
+
+    @Test fun actualPinJobUsesCompactBytesOnItsExplicitRoute() {
+        java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { server ->
+            server.soTimeout = 3000
+            val received = java.util.concurrent.CompletableFuture<ByteArray>()
+            val receiver = Thread {
+                try { server.accept().use { socket -> socket.soTimeout = 3000; received.complete(socket.getInputStream().readBytes()) } }
+                catch (error: Throwable) { received.completeExceptionally(error) }
+            }
+            receiver.start()
+            try {
+                val route = JSONObject().put("host", "127.0.0.1").put("port", server.localPort)
+                BridgePrinter.printJob(ClaimedPrintJob("fixture-pin", "pin", null, pinPayload().toString(), route.toString()))
+                val expected = byteArrayOf(0x1b, 0x40, 0x1b, 0x4d, 1, 0x1b, 0x20, 2, 0x1b, 0x45, 1) +
+                    "TAV. 12  PIN: 0123\n".toByteArray(Charsets.UTF_8) +
+                    byteArrayOf(0x1b, 0x45, 0, 0x1b, 0x64, 1, 0x1d, 0x56, 0)
+                assertArrayEquals(expected, received.get(5, java.util.concurrent.TimeUnit.SECONDS))
+            } finally { receiver.join(3500) }
+        }
+    }
+
+    @Test fun kitchenBytesKeepTheirExistingFiveLineFeedAndCut() {
+        val bytes = buildBytes("COMANDA SUSHI #-\n1x Nigiri", false)
+        assertArrayEquals(byteArrayOf(0x1b, 0x64, 5, 0x1d, 0x56, 0), bytes.takeLast(6).toByteArray())
+    }
+
+    @Test fun kitchenDepartmentNamedPinRemainsAFoodTicket() {
+        val payload = JSONObject("""{"department":"pin","items":[{"name":"Nigiri","quantity":1}]}""")
+        val job = ClaimedPrintJob("food-job", "pin", "food-order", payload.toString(), null)
+        val method = BridgePrinter.javaClass.getDeclaredMethod("renderTicket", ClaimedPrintJob::class.java, JSONObject::class.java)
+        method.isAccessible = true
+        val rendered = method.invoke(BridgePrinter, job, payload) as String
+        assertTrue(rendered.contains("COMANDA PIN"))
+        assertTrue(rendered.contains("1x Nigiri"))
+    }
+
     private fun withJournal(test: (java.io.File) -> Unit) {
         val directory = Files.createTempDirectory("mangiamo-print-test-").toFile()
         try { test(java.io.File(directory, "journal.properties")) }

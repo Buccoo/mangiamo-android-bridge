@@ -21,7 +21,7 @@ object BridgePrinter {
 
         val payload = parseJsonObject(job.payload)
         val ticketText = renderTicket(job, payload)
-        val escPosPayload = buildEscPosPayload(ticketText)
+        val escPosPayload = buildEscPosPayload(ticketText, isPinSlipJob(job, payload))
 
         sendRawPayloadWithRetry(host = host, port = port, payload = escPosPayload)
     }
@@ -56,6 +56,7 @@ object BridgePrinter {
     }
 
     private fun renderTicket(job: ClaimedPrintJob, payload: JSONObject?): String {
+        if (isPinSlipJob(job, payload)) return renderPinSlip(payload)
         if (payload == null) {
             return buildString {
                 appendLine("COMANDA CUCINA #-")
@@ -67,9 +68,6 @@ object BridgePrinter {
         }
 
         val department = normalizeDepartment(payload.optString("department", job.department))
-        if (department == "pin") {
-            return renderPinSlip(job, payload)
-        }
 
         val width = 42
         val items = payload.optJSONArray("items") ?: JSONArray()
@@ -115,27 +113,41 @@ object BridgePrinter {
         }
     }
 
-    private fun renderPinSlip(job: ClaimedPrintJob, payload: JSONObject): String {
-        val width = 42
-        val restaurantName = payload.optString("restaurant_name", "").trim().ifBlank { "Ristorante" }
-        val tableLabel = payload.opt("table_number")?.toString()?.trim().orEmpty().ifBlank { "-" }
-        val items = payload.optJSONArray("items") ?: JSONArray()
+    private fun isPinSlipJob(job: ClaimedPrintJob, payload: JSONObject?): Boolean =
+        normalizeDepartment(job.department) == "pin" && payload?.optString("purpose", "") == "pin_slip"
+
+    /** Keep the whole PIN line within 32 columns, including common CJK table labels. */
+    private fun compactTableLabel(value: Any?): String {
+        val clean = value?.toString().orEmpty().take(160)
+            .replace(Regex("[\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}]"), " ")
+            .replace(Regex("\\s+"), " ").trim().uppercase(Locale.ROOT)
+        val result = StringBuilder()
+        var columns = 0
+        var index = 0
+        while (index < clean.length) {
+            val point = Character.codePointAt(clean, index)
+            index += Character.charCount(point)
+            val type = Character.getType(point)
+            val mark = type == Character.NON_SPACING_MARK.toInt() || type == Character.COMBINING_SPACING_MARK.toInt() || type == Character.ENCLOSING_MARK.toInt()
+            val wide = point >= 0x1100 && (point <= 0x115f || point == 0x2329 || point == 0x232a ||
+                point in 0x2e80..0xa4cf || point in 0xac00..0xd7a3 || point in 0xf900..0xfaff ||
+                point in 0xfe10..0xfe6f || point in 0xff01..0xff60 || point in 0xffe0..0xffe6 ||
+                point in 0x1f300..0x1faff || point >= 0x20000)
+            val width = if (mark) 0 else if (wide) 2 else 1
+            if (columns + width > 12) break
+            result.appendCodePoint(point)
+            columns += width
+        }
+        return result.toString().trim().ifBlank { "-" }
+    }
+
+    private fun renderPinSlip(payload: JSONObject?): String {
+        val items = payload?.optJSONArray("items") ?: JSONArray()
         val firstItem = items.optJSONObject(0)
         val pinRaw = firstItem?.optString("name", "")?.replace(Regex("^PIN:\\s*", RegexOption.IGNORE_CASE), "")?.trim().orEmpty()
 
-        fun center(text: String): String {
-            if (text.length >= width) return text
-            val pad = (width - text.length) / 2
-            return " ".repeat(pad) + text
-        }
-
-        return buildString {
-            appendLine(center(restaurantName))
-            appendLine("-".repeat(width))
-            appendLine("TAVOLO: ${tableLabel.uppercase()}")
-            appendLine("PIN: $pinRaw")
-            appendLine("-".repeat(width))
-        }
+        if (!Regex("^[0-9]{4,6}$").matches(pinRaw)) throw PrintNotSentException("INVALID_PIN_SLIP")
+        return "TAV. ${compactTableLabel(payload?.opt("table_number"))}  PIN: $pinRaw"
     }
 
     private fun wrapText(input: String, width: Int): List<String> {
@@ -212,7 +224,7 @@ object BridgePrinter {
         return 0x00
     }
 
-    private fun buildEscPosPayload(ticketText: String): ByteArray {
+    private fun buildEscPosPayload(ticketText: String, pinSlip: Boolean = false): ByteArray {
         val esc: Byte = 0x1B
         val gs: Byte = 0x1D
         val out = ByteArrayOutputStream()
@@ -226,13 +238,13 @@ object BridgePrinter {
 
         val lines = ticketText.split("\n")
         for (line in lines) {
-            val shouldBold = isBoldLine(line)
+            val shouldBold = pinSlip || isBoldLine(line)
             if (shouldBold != bold) {
                 out.write(byteArrayOf(esc, 0x45, if (shouldBold) 0x01 else 0x00))
                 bold = shouldBold
             }
 
-            val nextSize = getLinePrintSize(line)
+            val nextSize: Byte = if (pinSlip) 0x00 else getLinePrintSize(line)
             if (nextSize != size) {
                 out.write(byteArrayOf(gs, 0x21, nextSize))
                 size = nextSize
@@ -244,7 +256,7 @@ object BridgePrinter {
         if (bold) out.write(byteArrayOf(esc, 0x45, 0x00))
         if (size.toInt() != 0) out.write(byteArrayOf(gs, 0x21, 0x00))
 
-        out.write(byteArrayOf(esc, 0x64, 0x05))
+        out.write(byteArrayOf(esc, 0x64, if (pinSlip) 0x01 else 0x05))
         out.write(byteArrayOf(gs, 0x56, 0x00))
         return out.toByteArray()
     }
