@@ -12,6 +12,12 @@ object BridgeLoop {
     private const val TAG = "BridgeLoop"
 
     private val cycleLock = AtomicBoolean(false)
+    private var serviceProtocolAvailable = true
+
+    private fun disableServiceProtocol() {
+        if (serviceProtocolAvailable) Log.w(TAG, "Protocollo servizio non disponibile sul server: bridge in sola stampa legacy")
+        serviceProtocolAvailable = false
+    }
 
     fun runCycle(context: Context) {
         if (!cycleLock.compareAndSet(false, true)) return
@@ -40,6 +46,16 @@ object BridgeLoop {
                 restaurantId = restaurant.id,
                 isActive = true
             )
+            var serviceProtocolRegistered = false
+            if (serviceProtocolAvailable) {
+                try {
+                    BridgeApiClient.registerServiceProtocol(runtimeConfig, session, restaurant.id)
+                    serviceProtocolRegistered = true
+                } catch (error: Throwable) {
+                    if (BridgeApiClient.isMissingRpc(error, "printing_register_service_protocol")) disableServiceProtocol()
+                    else throw error
+                }
+            }
 
             val journal = FilePrintJournal(File(context.filesDir, "print-delivery-journal.properties"))
             for (pending in journal.list().filter { it.operation.restaurantId == restaurant.id }) {
@@ -48,11 +64,18 @@ object BridgeLoop {
                 })
             }
 
-            val jobs = BridgeApiClient.claimPrintJobs(
+            var jobs = BridgeApiClient.claimPrintJobs(
                 config = runtimeConfig,
                 session = session,
                 restaurantId = restaurant.id
             )
+            if (jobs.isEmpty() && serviceProtocolRegistered && serviceProtocolAvailable) {
+                try { jobs = BridgeApiClient.claimServicePrintJobs(runtimeConfig, session, restaurant.id) }
+                catch (error: Throwable) {
+                    if (BridgeApiClient.isMissingRpc(error, "print_claim_service_jobs")) disableServiceProtocol()
+                    else throw error
+                }
+            }
             if (jobs.isNotEmpty()) {
                 Log.i(TAG, "Claimed ${jobs.size} jobs for restaurant=${restaurant.id}")
             }
@@ -61,9 +84,21 @@ object BridgeLoop {
             for (job in jobs) {
                 try {
                     val outcome = deliverPrintJob(journal, PrintOperation(job.id, restaurant.id, runtimeConfig.consumerId), {
-                        try { BridgeApiClient.renewPrintClaim(runtimeConfig, session, job.id) }
-                        catch (error: Throwable) { throw PrintNotSentException(normalizeError(error)) }
-                        BridgePrinter.printJob(job)
+                        if (BridgePrinter.validateServiceJob(job)) {
+                            BridgePrinter.printJob(job, beforeWrite = {
+                                try {
+                                    if (!serviceProtocolAvailable) throw PrintNotSentException("SERVICE_PRINT_RENEWAL_REQUIRED")
+                                    BridgeApiClient.renewServicePrintClaim(runtimeConfig, session, job.id)
+                                } catch (error: Throwable) {
+                                    if (BridgeApiClient.isMissingRpc(error, "print_renew_service_claim")) disableServiceProtocol()
+                                    throw PrintNotSentException(normalizeError(error))
+                                }
+                            })
+                        } else {
+                            try { BridgeApiClient.renewPrintClaim(runtimeConfig, session, job.id) }
+                            catch (error: Throwable) { throw PrintNotSentException(normalizeError(error)) }
+                            BridgePrinter.printJob(job)
+                        }
                     }, { success, errorMessage, state ->
                         BridgeApiClient.completePrintJob(runtimeConfig, session, job.id, success, errorMessage, state)
                     })

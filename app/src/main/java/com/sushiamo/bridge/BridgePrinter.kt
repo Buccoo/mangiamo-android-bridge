@@ -11,7 +11,10 @@ import java.util.Date
 import java.util.Locale
 
 object BridgePrinter {
-    fun printJob(job: ClaimedPrintJob) {
+    fun printJob(job: ClaimedPrintJob, beforeWrite: (() -> Unit)? = null) {
+        val payload = parseJsonObject(job.payload)
+        val service = serviceTicket(job, payload)
+        if (service != null && beforeWrite == null) throw PrintNotSentException("SERVICE_PRINT_RENEWAL_REQUIRED")
         val route = parseJsonObject(job.route)
         val host = route?.optString("host", "")?.trim().orEmpty()
         val port = route?.optInt("port", 9100) ?: 9100
@@ -19,18 +22,17 @@ object BridgePrinter {
             throw PrintNotSentException("NO_PRINTER_HOST")
         }
 
-        val payload = parseJsonObject(job.payload)
         val ticketText = renderTicket(job, payload)
         val escPosPayload = buildEscPosPayload(ticketText, isPinSlipJob(job, payload))
 
-        sendRawPayloadWithRetry(host = host, port = port, payload = escPosPayload)
+        sendRawPayloadWithRetry(host = host, port = port, payload = escPosPayload, beforeWrite = beforeWrite)
     }
 
-    private fun sendRawPayloadWithRetry(host: String, port: Int, payload: ByteArray) {
+    private fun sendRawPayloadWithRetry(host: String, port: Int, payload: ByteArray, beforeWrite: (() -> Unit)?) {
         var lastError: Throwable? = null
         repeat(2) { attempt ->
             try {
-                sendRawPayload(host = host, port = port, payload = payload)
+                sendRawPayload(host = host, port = port, payload = payload, beforeWrite = beforeWrite)
                 return
             } catch (error: Throwable) {
                 lastError = error
@@ -43,11 +45,14 @@ object BridgePrinter {
         throw PrintNotSentException(lastError?.message ?: "PRINT_SEND_FAILED")
     }
 
-    private fun sendRawPayload(host: String, port: Int, payload: ByteArray) {
+    private fun sendRawPayload(host: String, port: Int, payload: ByteArray, beforeWrite: (() -> Unit)?) {
         Socket().use { socket ->
             try { socket.connect(InetSocketAddress(host, sanitizePort(port)), 8000) }
             catch (error: Throwable) { throw PrintNotSentException(error.message ?: "CONNECT_FAILED") }
             socket.soTimeout = 8000
+            // Server lease/fence authority is checked after connect, immediately
+            // before each first wire write, including a proven not-sent retry.
+            beforeWrite?.invoke()
             BufferedOutputStream(socket.getOutputStream()).use { out ->
                 out.write(payload)
                 out.flush()
@@ -56,6 +61,7 @@ object BridgePrinter {
     }
 
     private fun renderTicket(job: ClaimedPrintJob, payload: JSONObject?): String {
+        val service = serviceTicket(job, payload)
         if (isPinSlipJob(job, payload)) return renderPinSlip(payload)
         if (payload == null) {
             return buildString {
@@ -77,6 +83,15 @@ object BridgePrinter {
         val createdAt = formatTimestamp(payload.opt("created_at") ?: "")
 
         return buildString {
+            if (service != null) {
+                val labels = when (service.intent) {
+                    "information" -> listOf("INFORMAZIONE - ATTENDI IL VIA", "NON INIZIARE LA PREPARAZIONE")
+                    "prepare" -> listOf("VIA PREPARAZIONE", "Confermare avvio sul KDS")
+                    else -> listOf("ANNULLAMENTO - VERIFICA CON LO STAFF", "Non annulla lavorazioni gia iniziate")
+                }
+                labels.forEach { appendLine(it) }
+                appendLine("USCITA ${service.groupId.take(8)} REV.${service.revision}")
+            }
             appendLine("COMANDA ${department.uppercase()} $orderLabel")
             appendLine("TAVOLO: ${tableLabel.uppercase()}")
             if (createdAt.isNotBlank()) appendLine("DATA: $createdAt")
@@ -111,6 +126,45 @@ object BridgePrinter {
             }
             appendLine("-- $restaurantName --")
         }
+    }
+
+    fun validateServiceJob(job: ClaimedPrintJob): Boolean = serviceTicket(job, parseJsonObject(job.payload)) != null
+
+    private data class ServiceTicket(val intent: String, val groupId: String, val revision: Long)
+
+    private fun serviceTicket(job: ClaimedPrintJob, payload: JSONObject?): ServiceTicket? {
+        if (payload?.let { candidate -> listOf("service_protocol_version", "service_group_id", "service_batch_id", "execution_fence").any { candidate.has(it) } } != true && !job.serviceClaimed) return null
+        fun invalid(): Nothing = throw PrintNotSentException("INVALID_SERVICE_PRINT_PROTOCOL")
+        if (payload == null || payload.opt("service_protocol_version") != 1) invalid()
+        fun uuid(value: Any?) = value is String && Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$").matches(value)
+        fun text(value: Any?, maximum: Int) = value is String && value.isNotBlank() && value.length <= maximum && !Regex("[\\p{Cc}\\p{Cf}]").containsMatchIn(value)
+        fun integral(value: Any?, maximum: Double): Boolean = value is Number && value.toDouble().isFinite() && value.toDouble() >= 1 && value.toDouble() <= maximum && value.toDouble() % 1.0 == 0.0
+        val intent = payload.opt("intent") as? String ?: invalid()
+        val items = payload.optJSONArray("items") ?: invalid()
+        if (!uuid(payload.opt("service_group_id")) || !uuid(payload.opt("session_id")) || !uuid(payload.opt("order_id")) ||
+            !integral(payload.opt("execution_revision"), 9007199254740991.0) || !text(payload.opt("dedupe_key"), 240) ||
+            intent !in listOf("information", "prepare", "cancel") || payload.optString("purpose", "") == "pin_slip" ||
+            listOf(normalizeDepartment(job.department), normalizeDepartment(payload.optString("department", ""))).any { it in listOf("pin", "cash") }) invalid()
+        for (index in 0 until items.length()) {
+            val item = items.optJSONObject(index) ?: invalid()
+            if (!integral(item.opt("quantity"), 999.0) || !text(item.opt("name"), 1024) || (item.has("order_item_id") && !uuid(item.opt("order_item_id")))) invalid()
+        }
+        if (intent == "prepare") {
+            val notBefore = serviceTimestamp(payload.opt("not_before")) ?: invalid()
+            val expires = serviceTimestamp(payload.opt("expires_at")) ?: invalid()
+            if (!uuid(payload.opt("service_batch_id")) || !uuid(payload.opt("execution_fence")) || expires <= notBefore || items.length() != 1 || !uuid(items.optJSONObject(0)?.opt("order_item_id"))) invalid()
+        }
+        // No device-clock admission decision: the service renewal RPC owns TTL.
+        return ServiceTicket(intent, payload.getString("service_group_id"), (payload.get("execution_revision") as Number).toLong())
+    }
+
+    private fun serviceTimestamp(value: Any?): Long? {
+        if (value !is String || !Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?(?:Z|[+-]\\d{2}:\\d{2})$").matches(value)) return null
+        val normalized = value.replace(Regex("Z$"), "+0000").replace(Regex("([+-]\\d{2}):(\\d{2})$"), "\$1\$2")
+            .replace(Regex("\\.(\\d+)(?=[+-]\\d{4}$)")) { "." + it.groupValues[1].take(3).padEnd(3, '0') }
+        val formatter = SimpleDateFormat(if (normalized.contains('.')) "yyyy-MM-dd'T'HH:mm:ss.SSSZ" else "yyyy-MM-dd'T'HH:mm:ssZ", Locale.ROOT).apply { isLenient = false }
+        val position = java.text.ParsePosition(0)
+        return formatter.parse(normalized, position)?.takeIf { position.index == normalized.length }?.time
     }
 
     private fun isPinSlipJob(job: ClaimedPrintJob, payload: JSONObject?): Boolean =

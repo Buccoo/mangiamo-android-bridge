@@ -166,6 +166,43 @@ object BridgeApiClient {
             .header("content-type", "application/json").build(), "PRINT_RENEW_CLAIM")
     }
 
+    fun registerServiceProtocol(config: BridgeRuntimeConfig, session: BridgeSession, restaurantId: String) {
+        executeJson(serviceRequest(config, session, "printing_register_service_protocol", JSONObject()
+            .put("p_agent_id", config.consumerId).put("p_protocol_version", 1).put("p_restaurant_id", restaurantId)), "PRINTING_REGISTER_SERVICE_PROTOCOL")
+    }
+
+    fun claimServicePrintJobs(config: BridgeRuntimeConfig, session: BridgeSession, restaurantId: String): List<ClaimedPrintJob> {
+        val rows = executeJsonArray(serviceRequest(config, session, "print_claim_service_jobs", JSONObject()
+            .put("p_consumer_id", config.consumerId).put("p_limit", 1).put("p_protocol_version", 1).put("p_restaurant_id", restaurantId)), "PRINT_CLAIM_SERVICE_JOBS")
+        return buildList {
+            for (index in 0 until rows.length()) {
+                val row = rows.optJSONObject(index) ?: continue
+                val id = row.optString("id", "").trim()
+                if (id.isBlank()) continue
+                add(ClaimedPrintJob(id, row.optString("department", "cucina"), row.optString("order_id", "").ifBlank { null },
+                    row.opt("payload")?.toString(), row.opt("route")?.toString(), serviceClaimed = true))
+            }
+        }
+    }
+
+    fun renewServicePrintClaim(config: BridgeRuntimeConfig, session: BridgeSession, jobId: String) {
+        val response = executeJson(serviceRequest(config, session, "print_renew_service_claim", JSONObject()
+            .put("p_consumer_id", config.consumerId).put("p_job_id", jobId).put("p_protocol_version", 1)), "PRINT_RENEW_SERVICE_CLAIM")
+        val lease = response.opt("lease_seconds") as? Number
+        if (response.opt("ok") != true || lease == null || !lease.toDouble().isFinite() || lease.toDouble() <= 0) throw PrintNotSentException("SERVICE_PRINT_RENEWAL_REQUIRED")
+    }
+
+    fun isMissingRpc(error: Throwable, rpcName: String): Boolean {
+        val message = error.message.orEmpty().lowercase(java.util.Locale.ROOT)
+        return message.contains(rpcName.lowercase(java.util.Locale.ROOT)) &&
+            listOf("schema cache", "could not find", "does not exist", "not found").any { message.contains(it) }
+    }
+
+    private fun serviceRequest(config: BridgeRuntimeConfig, session: BridgeSession, rpcName: String, body: JSONObject): Request =
+        Request.Builder().url(rpcUrl(config.supabaseUrl, rpcName)).post(body.toString().toRequestBody(jsonMediaType))
+            .header("apikey", config.supabaseAnonKey).header("authorization", "Bearer ${session.accessToken}")
+            .header("content-type", "application/json").build()
+
     private fun buildAuthUrl(baseUrl: String, grantType: String): String {
         val base = normalizeBaseUrl(baseUrl)
         return "$base/auth/v1/token?grant_type=$grantType"

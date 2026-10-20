@@ -29,5 +29,6 @@ data class ClaimedPrintJob(
     val department: String,
     val orderId: String?,
     val payload: String?,
-    val route: String?
+    val route: String?,
+    val serviceClaimed: Boolean = false
 )
