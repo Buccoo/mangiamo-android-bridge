@@ -90,6 +90,14 @@ object BridgeApiClient {
         )
     }
 
+    fun fetchKitchenLayout(config: BridgeRuntimeConfig, session: BridgeSession, restaurantId: String): JSONObject? {
+        val url = buildRestUrl(config.supabaseUrl, "restaurants", listOf("select" to "settings", "id" to "eq.$restaurantId", "limit" to "1"))
+        val rows = executeJsonArray(Request.Builder().url(url).get()
+            .header("apikey", config.supabaseAnonKey).header("authorization", "Bearer ${session.accessToken}").build(), "PRINT_LAYOUT_READ")
+        val restaurant = rows.optJSONObject(0) ?: throw PrintNotSentException("RESTAURANT_NOT_FOUND")
+        return restaurant.optJSONObject("settings")?.optJSONObject("printing")?.optJSONObject("ticket_layout")?.optJSONObject("kitchen")
+    }
+
     fun claimPrintJobs(config: BridgeRuntimeConfig, session: BridgeSession, restaurantId: String): List<ClaimedPrintJob> {
         val url = rpcUrl(config.supabaseUrl, "print_claim_jobs")
         val body = JSONObject()

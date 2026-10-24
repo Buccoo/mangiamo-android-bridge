@@ -64,6 +64,7 @@ object BridgeLoop {
                 })
             }
 
+            val kitchenLayout = BridgeApiClient.fetchKitchenLayout(runtimeConfig, session, restaurant.id)
             var jobs = BridgeApiClient.claimPrintJobs(
                 config = runtimeConfig,
                 session = session,
@@ -85,7 +86,7 @@ object BridgeLoop {
                 try {
                     val outcome = deliverPrintJob(journal, PrintOperation(job.id, restaurant.id, runtimeConfig.consumerId), {
                         if (BridgePrinter.validateServiceJob(job)) {
-                            BridgePrinter.printJob(job, beforeWrite = {
+                            BridgePrinter.printJobWithLayout(job, kitchenLayout, beforeWrite = {
                                 try {
                                     if (!serviceProtocolAvailable) throw PrintNotSentException("SERVICE_PRINT_RENEWAL_REQUIRED")
                                     BridgeApiClient.renewServicePrintClaim(runtimeConfig, session, job.id)
@@ -97,7 +98,7 @@ object BridgeLoop {
                         } else {
                             try { BridgeApiClient.renewPrintClaim(runtimeConfig, session, job.id) }
                             catch (error: Throwable) { throw PrintNotSentException(normalizeError(error)) }
-                            BridgePrinter.printJob(job)
+                            BridgePrinter.printJobWithLayout(job, kitchenLayout)
                         }
                     }, { success, errorMessage, state ->
                         BridgeApiClient.completePrintJob(runtimeConfig, session, job.id, success, errorMessage, state)

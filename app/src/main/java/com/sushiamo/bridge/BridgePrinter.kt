@@ -11,7 +11,9 @@ import java.util.Date
 import java.util.Locale
 
 object BridgePrinter {
-    fun printJob(job: ClaimedPrintJob, beforeWrite: (() -> Unit)? = null) {
+    fun printJob(job: ClaimedPrintJob, beforeWrite: (() -> Unit)? = null) = printJobWithLayout(job, null, beforeWrite)
+
+    fun printJobWithLayout(job: ClaimedPrintJob, kitchenLayout: JSONObject?, beforeWrite: (() -> Unit)? = null) {
         val payload = parseJsonObject(job.payload)
         val service = serviceTicket(job, payload)
         if (service != null && beforeWrite == null) throw PrintNotSentException("SERVICE_PRINT_RENEWAL_REQUIRED")
@@ -22,8 +24,9 @@ object BridgePrinter {
             throw PrintNotSentException("NO_PRINTER_HOST")
         }
 
-        val ticketText = renderTicket(job, payload)
-        val escPosPayload = buildEscPosPayload(ticketText, isPinSlipJob(job, payload))
+        val layout = kitchenLayout ?: payload?.optJSONObject("layout")?.let { it.optJSONObject("kitchen") ?: it }
+        val escPosPayload = if (isPinSlipJob(job, payload)) buildEscPosPayload(renderPinSlip(payload), true)
+            else KitchenTicketLayout.bytes(kitchenLines(job, payload, layout), layout)
 
         sendRawPayloadWithRetry(host = host, port = port, payload = escPosPayload, beforeWrite = beforeWrite)
     }
@@ -60,74 +63,27 @@ object BridgePrinter {
         }
     }
 
-    private fun renderTicket(job: ClaimedPrintJob, payload: JSONObject?): String {
+    private fun kitchenLines(job: ClaimedPrintJob, payload: JSONObject?, layout: JSONObject?): List<KitchenTicketLayout.Line> {
         val service = serviceTicket(job, payload)
-        if (isPinSlipJob(job, payload)) return renderPinSlip(payload)
-        if (payload == null) {
-            return buildString {
-                appendLine("COMANDA CUCINA #-")
-                appendLine("TAVOLO: -")
-                appendLine("------------------------------------------")
-                appendLine("1x Ordine")
-                appendLine("-- Ristorante --")
+        val source = payload ?: JSONObject()
+        if (!source.has("department")) source.put("department", job.department)
+        val headings = if (service == null) emptyList() else {
+            val labels = when (service.intent) {
+                "information" -> listOf("INFORMAZIONE - ATTENDI IL VIA", "NON INIZIARE LA PREPARAZIONE")
+                "prepare" -> listOf("VIA PREPARAZIONE", "Confermare avvio sul KDS")
+                else -> listOf("ANNULLAMENTO - VERIFICA CON LO STAFF", "Non annulla lavorazioni gia iniziate")
             }
+            labels + "USCITA ${service.groupId.take(8)} REV.${service.revision}"
         }
-
-        val department = normalizeDepartment(payload.optString("department", job.department))
-
-        val width = 42
-        val items = payload.optJSONArray("items") ?: JSONArray()
-        val restaurantName = payload.optString("restaurant_name", "").trim().ifBlank { "Ristorante" }
-        val tableLabel = payload.opt("table_number")?.toString()?.trim().orEmpty().ifBlank { "-" }
-        val orderLabel = payload.opt("order_number")?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { "#$it" } ?: "#-"
-        val createdAt = formatTimestamp(payload.opt("created_at") ?: "")
-
-        return buildString {
-            if (service != null) {
-                val labels = when (service.intent) {
-                    "information" -> listOf("INFORMAZIONE - ATTENDI IL VIA", "NON INIZIARE LA PREPARAZIONE")
-                    "prepare" -> listOf("VIA PREPARAZIONE", "Confermare avvio sul KDS")
-                    else -> listOf("ANNULLAMENTO - VERIFICA CON LO STAFF", "Non annulla lavorazioni gia iniziate")
-                }
-                labels.forEach { appendLine(it) }
-                appendLine("USCITA ${service.groupId.take(8)} REV.${service.revision}")
-            }
-            appendLine("COMANDA ${department.uppercase()} $orderLabel")
-            appendLine("TAVOLO: ${tableLabel.uppercase()}")
-            if (createdAt.isNotBlank()) appendLine("DATA: $createdAt")
-            appendLine("-".repeat(width))
-            for (index in 0 until items.length()) {
-                val item = items.optJSONObject(index) ?: continue
-                val qty = item.optInt("quantity", 1).coerceAtLeast(1)
-                val label = "${qty}x ${prettifyDishName(item.opt("name"))}"
-                for (chunk in wrapText(label, width)) {
-                    appendLine(chunk)
-                }
-                val modifiers = item.optJSONArray("modifiers") ?: JSONArray()
-                for (modifierIndex in 0 until modifiers.length()) {
-                    val modifier = modifiers.optJSONObject(modifierIndex) ?: continue
-                    val name = modifier.optString("name", "").trim()
-                    if (name.isBlank()) continue
-                    val modifierQuantity = modifier.optInt("qty", 1).coerceAtLeast(1)
-                    val prefix = when (modifier.optString("modifier_type", "variant").trim().lowercase(Locale.ROOT)) {
-                        "remove", "removal" -> "SENZA "
-                        "extra", "addon" -> "+ "
-                        else -> "Variante: "
-                    }
-                    val suffix = if (modifierQuantity > 1) " x$modifierQuantity" else ""
-                    wrapText("$prefix$name$suffix", width - 2).forEach { appendLine(" $it") }
-                }
-                val notes = item.optString("notes", "").trim()
-                if (notes.isNotBlank()) {
-                    for (chunk in wrapText("Nota: $notes", width - 2)) {
-                        appendLine(" $chunk")
-                    }
-                }
-            }
-            appendLine("-- $restaurantName --")
-        }
+        val fallbackLayout = source.optJSONObject("layout")?.let { it.optJSONObject("kitchen") ?: it }
+        return KitchenTicketLayout.render(source, layout ?: fallbackLayout, formatTimestamp(source.opt("created_at")), headings)
     }
 
+    private fun renderTicket(job: ClaimedPrintJob, payload: JSONObject?): String {
+        serviceTicket(job, payload)
+        if (isPinSlipJob(job, payload)) return renderPinSlip(payload)
+        return kitchenLines(job, payload, null).joinToString("\n") { it.text }
+    }
     fun validateServiceJob(job: ClaimedPrintJob): Boolean = serviceTicket(job, parseJsonObject(job.payload)) != null
 
     private data class ServiceTicket(val intent: String, val groupId: String, val revision: Long)
@@ -243,7 +199,7 @@ object BridgePrinter {
                 .replace(Regex("\\.(\\d+)(?=[+-]\\d{4}$)")) { "." + it.groupValues[1].take(3).padEnd(3, '0') }
             val pattern = if (normalized.contains('.')) "yyyy-MM-dd'T'HH:mm:ss.SSSZ" else "yyyy-MM-dd'T'HH:mm:ssZ"
             val date = SimpleDateFormat(pattern, Locale.US).apply { isLenient = false }.parse(normalized) ?: return raw
-            SimpleDateFormat("yyyy/M/d HH:mm", Locale.getDefault()).format(date)
+            SimpleDateFormat("dd/MM/yyyy, HH:mm:ss", Locale.ITALY).format(date)
         } catch (_: Throwable) {
             raw
         }

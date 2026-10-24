@@ -101,7 +101,7 @@ class PrintDeliveryTest {
         val method = BridgePrinter.javaClass.getDeclaredMethod("renderTicket", ClaimedPrintJob::class.java, JSONObject::class.java)
         method.isAccessible = true
         val rendered = method.invoke(BridgePrinter, job, payload) as String
-        assertTrue(rendered.contains("COMANDA PIN"))
+        assertTrue(rendered.contains("COMANDA PIN", ignoreCase = true))
         assertTrue(rendered.contains("1x Nigiri"))
     }
 
