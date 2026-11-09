@@ -5,6 +5,23 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class KitchenTicketLayoutTest {
+    @Test fun sectionStylesAndPhysicalColumnsMatchNativeCommands() {
+        val item = JSONObject().put("name", "Spaghetti pomodoro basilico mozzarella").put("quantity", 1).put("notes", "senza sale").put("guest_name", "Mario")
+        val payload = JSONObject().put("table_number", "8").put("restaurant_name", "Locale").put("items", JSONArray().put(item))
+        val layout = JSONObject().put("font", "B").put("width", 48).put("printable_dots", 384)
+            .put("block_order", JSONArray(listOf("items", "items", "invalid", "timestamp", "table", "header", "footer")))
+            .put("styles", JSONObject().put("items", JSONObject().put("font", "A").put("size", "double").put("bold", true).put("align", "right").put("space_after", 1))
+                .put("notes", JSONObject().put("font", "B").put("size", "normal").put("bold", true)))
+        val lines = KitchenTicketLayout.render(payload, layout, "09/11/2026 11:00:00")
+        assertEquals(listOf("1x Spaghetti", "pomodoro", "basilico", "mozzarella"), lines.filter { it.text.isNotEmpty() }.take(4).map { it.text })
+        assertTrue(lines.indexOfFirst { it.text.startsWith("Nota:") } < lines.indexOfFirst { it.text.startsWith("Tavolo:") })
+        assertEquals(1, lines.count { it.text == "09/11/2026 11:00:00" })
+        val bytes = KitchenTicketLayout.bytes(lines, layout).map { it.toInt() and 255 }
+        assertTrue(bytes.windowed(16).any { it == listOf(27,77,0,27,97,2,27,69,1,29,33,17,27,51,56,49) })
+        assertEquals(listOf(27,69,0,29,33,0,27,97,0,27,77,0,27,50,27,100,5,29,86,0), bytes.takeLast(20))
+        assertEquals(30, KitchenTicketLayout.width(JSONObject().put("font", "A").put("width", 80).put("printable_dots", 360)))
+    }
+
     private fun payload() = JSONObject().put("table_number", "8").put("restaurant_name", "Locale").put("order_number", 7)
         .put("items", JSONArray().put(JSONObject().put("name", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ").put("quantity", 2).put("notes", "senza sale")))
     @Test fun largeRowsFitEverySupportedWidthWithoutLosingContent() {
