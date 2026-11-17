@@ -5,6 +5,17 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class KitchenTicketLayoutTest {
+    @Test fun dishNumberDefaultsToParenthesesAndCanBeCustomizedOrHidden() {
+        val payload = JSONObject().put("items", JSONArray().put(JSONObject().put("name", "GUNKAN CETRIOLI EBI 2PZ").put("quantity", 1).put("item_number", 241)))
+        for ((style, prefix) in listOf("" to "(241)", "parentheses" to "(241)", "hash" to "#241", "plain" to "241", "invalid" to "(241)")) {
+            val items = JSONObject().put("item_number_style", style).put("size", "normal")
+            val layout = JSONObject().put("items", items)
+            val text = KitchenTicketLayout.render(payload, layout, "").joinToString("\n") { it.text }
+            assertTrue(text.contains("1x $prefix GUNKAN CETRIOLI EBI 2PZ"))
+            items.put("show_item_number", false)
+            assertTrue(KitchenTicketLayout.render(payload, layout, "").any { it.text == "1x GUNKAN CETRIOLI EBI 2PZ" })
+        }
+    }
     @Test fun sectionStylesAndPhysicalColumnsMatchNativeCommands() {
         val item = JSONObject().put("name", "Spaghetti pomodoro basilico mozzarella").put("quantity", 1).put("notes", "senza sale").put("guest_name", "Mario")
         val payload = JSONObject().put("table_number", "8").put("restaurant_name", "Locale").put("items", JSONArray().put(item))

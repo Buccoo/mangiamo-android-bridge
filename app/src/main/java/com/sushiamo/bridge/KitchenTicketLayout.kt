@@ -93,7 +93,11 @@ object KitchenTicketLayout {
             for (i in 0 until (rows?.length() ?: 0)) {
                 val item = rows?.optJSONObject(i) ?: continue
                 val quantity = item.optInt("quantity", 1).coerceAtLeast(1)
-                val number = if (flag(items, "show_item_number") && item.has("item_number") && !item.isNull("item_number")) "#${item.opt("item_number")} " else ""
+                val dishNumber = clean(item.opt("item_number")?.toString().orEmpty())
+                val formattedNumber = when (items.optString("item_number_style")) {
+                    "hash" -> "#$dishNumber"; "plain" -> dishNumber; else -> "($dishNumber)"
+                }
+                val number = if (flag(items, "show_item_number") && item.has("item_number") && !item.isNull("item_number")) "$formattedNumber " else ""
                 val qty = if (flag(items, "show_quantity") || headings.isNotEmpty()) "${quantity}x " else ""
                 add("$qty$number${item.optString("name").trim()}", items.optString("size") != "normal", flag(items, "bold"))
                 if (flag(items, "show_guest_name") && item.optString("guest_name").isNotBlank()) add("Ospite: ${item.optString("guest_name").trim()}", sub = true, section = "guest")
